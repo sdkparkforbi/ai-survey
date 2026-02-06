@@ -64,19 +64,11 @@ BUDGET_QUESTIONS = [
 # ========== 세션 상태 초기화 ==========
 if 'ai_evaluations' not in st.session_state:
     st.session_state.ai_evaluations = {}
-if 'gist_id' not in st.session_state:
-    st.session_state.gist_id = ""
 
 # ========== API 키 가져오기 ==========
 def get_openai_key():
     try:
         return st.secrets["OPENAI_API_KEY"]
-    except:
-        return None
-
-def get_github_token():
-    try:
-        return st.secrets["GITHUB_TOKEN"]
     except:
         return None
 
@@ -124,7 +116,6 @@ def evaluate_with_ai(question_text, plan_content):
         if response.status_code == 200:
             content = response.json()["choices"][0]["message"]["content"]
             
-            # 점수 파싱
             score = 0.5
             score_match = re.search(r'점수[:\s]*([0-9.]+)', content)
             if score_match:
@@ -133,7 +124,6 @@ def evaluate_with_ai(question_text, plan_content):
                     score = score / 100
                 score = max(0, min(1, score))
             
-            # 평가 의견 파싱
             comment_match = re.search(r'평가[:\s]*(.+)', content, re.DOTALL)
             comment = comment_match.group(1).strip() if comment_match else content.strip()
             
@@ -168,10 +158,10 @@ def calculate_scores():
                     ai_score = st.session_state.ai_evaluations.get(code, {}).get("score", 0.5)
                     section_score += q["points"] * ai_score
         
-        section_scores[section["id"]] = round(section_score, 1)
+        section_scores[section["id"]] = int(round(section_score))
         total += section_score
     
-    return section_scores, round(total, 1)
+    return section_scores, int(round(total))
 
 def get_grade(score):
     if score >= 85:
@@ -229,12 +219,8 @@ def get_all_responses():
     
     return responses, plans
 
-# ========== GitHub Gist ==========
-def save_to_gist(university_name, respondent_info):
-    token = get_github_token()
-    if not token:
-        return False, "GitHub Token이 설정되지 않았습니다"
-    
+# ========== JSON 내보내기 ==========
+def export_to_json(university_name, respondent_info):
     responses, plans = get_all_responses()
     section_scores, total_score = calculate_scores()
     grade, _, _ = get_grade(total_score)
@@ -251,35 +237,7 @@ def save_to_gist(university_name, respondent_info):
         "saved_at": datetime.now().isoformat()
     }
     
-    filename = f"ai_survey_{university_name.replace(' ', '_')}.json"
-    gist_data = {
-        "description": f"AI중심대학 자가진단 - {university_name}",
-        "public": False,
-        "files": {filename: {"content": json.dumps(data, ensure_ascii=False, indent=2)}}
-    }
-    
-    try:
-        if st.session_state.gist_id:
-            response = requests.patch(
-                f"https://api.github.com/gists/{st.session_state.gist_id}",
-                headers={"Authorization": f"token {token}"},
-                json=gist_data
-            )
-        else:
-            response = requests.post(
-                "https://api.github.com/gists",
-                headers={"Authorization": f"token {token}"},
-                json=gist_data
-            )
-        
-        if response.status_code in [200, 201]:
-            result = response.json()
-            st.session_state.gist_id = result["id"]
-            return True, f"저장 완료! Gist ID: {result['id']}"
-        else:
-            return False, f"저장 실패: {response.json().get('message', '알 수 없는 오류')}"
-    except Exception as e:
-        return False, f"오류: {str(e)}"
+    return json.dumps(data, ensure_ascii=False, indent=2)
 
 # ========== 엑셀 데이터 ==========
 def create_excel_data(university_name):
@@ -346,39 +304,50 @@ st.title("🎯 AI중심대학 준비도 자가진단")
 st.markdown("**2026년 AI중심대학 사업 신청을 위한 우리 대학의 준비 현황을 점검합니다**")
 
 # API 상태
-col_api1, col_api2 = st.columns(2)
-with col_api1:
-    if get_openai_key():
-        st.success("✅ OpenAI API 연결됨")
-    else:
-        st.warning("⚠️ OpenAI API 미설정")
-with col_api2:
-    if get_github_token():
-        st.success("✅ GitHub 연결됨")
-    else:
-        st.warning("⚠️ GitHub 미설정")
+if get_openai_key():
+    st.success("✅ OpenAI API 연결됨 - AI 평가 가능")
+else:
+    st.warning("⚠️ OpenAI API 미설정 - '계획있음' 선택 시 50% 고정 점수 적용")
 
 st.divider()
 
-# ========== 점수판 ==========
+# ========== 점수판 (테이블 형식) ==========
 section_scores, total_score = calculate_scores()
 grade, grade_desc, grade_color = get_grade(total_score)
 
-col1, col2, col3 = st.columns([1, 2, 1])
-with col1:
-    st.metric("총점", f"{total_score}/100점")
-with col2:
-    score_cols = st.columns(6)
-    section_names = ["거버넌스", "교육체계", "제도화", "산업연계", "특성화", "확산"]
-    section_totals = [25, 25, 20, 15, 10, 5]
-    for i, (name, stotal) in enumerate(zip(section_names, section_totals)):
-        with score_cols[i]:
-            st.metric(name, f"{section_scores.get(i+1, 0)}/{stotal}")
-with col3:
+col_total, col_table, col_grade = st.columns([1, 3, 1])
+
+with col_total:
     st.markdown(f"""
-    <div style="background:{grade_color}; color:white; padding:20px; border-radius:15px; text-align:center;">
-        <div style="font-size:2.5em; font-weight:bold;">{grade}</div>
-        <div style="font-size:0.9em;">{grade_desc}</div>
+    <div style="text-align:center; padding:20px;">
+        <div style="font-size:4em; font-weight:bold; color:#667eea;">{total_score}</div>
+        <div style="font-size:1.2em; color:#666;">/ 100점</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+with col_table:
+    # 세부 점수를 데이터프레임으로 표시
+    score_df = pd.DataFrame({
+        "영역": ["거버넌스", "교육체계", "제도화", "산업연계", "특성화", "확산"],
+        "획득": [section_scores.get(i, 0) for i in range(1, 7)],
+        "만점": [25, 25, 20, 15, 10, 5]
+    })
+    st.dataframe(
+        score_df,
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "영역": st.column_config.TextColumn("영역", width="medium"),
+            "획득": st.column_config.NumberColumn("획득", format="%d점"),
+            "만점": st.column_config.NumberColumn("만점", format="%d점"),
+        }
+    )
+
+with col_grade:
+    st.markdown(f"""
+    <div style="background:{grade_color}; color:white; padding:30px 20px; border-radius:15px; text-align:center; height:100%;">
+        <div style="font-size:3em; font-weight:bold;">{grade}</div>
+        <div style="font-size:0.9em; margin-top:10px;">{grade_desc}</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -390,6 +359,18 @@ with col_uni1:
     university_name = st.text_input("📍 대학명 *", key="university_name")
 with col_uni2:
     respondent_info = st.text_input("👤 응답자 정보 (선택)", key="respondent_info")
+
+# ========== 기존 데이터 불러오기 ==========
+with st.expander("📂 기존 데이터 불러오기 (JSON 파일)"):
+    uploaded_file = st.file_uploader("JSON 파일 선택", type=['json'], label_visibility="collapsed")
+    if uploaded_file is not None:
+        try:
+            data = json.load(uploaded_file)
+            st.session_state.ai_evaluations = data.get("ai_evaluations", {})
+            st.success(f"✅ 불러오기 완료! ({data.get('university_name', '')} - {data.get('total_score', 0)}점)")
+            st.info("⚠️ 응답 데이터를 적용하려면 페이지를 새로고침 후 다시 불러오세요")
+        except Exception as e:
+            st.error(f"파일 읽기 오류: {e}")
 
 st.divider()
 
@@ -410,7 +391,7 @@ for section in SECTIONS:
                 horizontal=True
             )
             
-            # ★ 핵심: "계획있음" 선택 시 계획 입력란 표시
+            # "계획있음" 선택 시 계획 입력란 표시
             if "계획있음" in selected:
                 st.text_area(
                     "📝 계획 내용을 입력하세요 (AI가 평가합니다)",
@@ -442,7 +423,6 @@ with st.expander("**※ 예산 (필수 확인)**", expanded=True):
             horizontal=True
         )
         
-        # "확보 중" 선택 시 계획 입력란 표시
         if selected == "확보 중":
             st.text_area(
                 "📝 확보 계획을 입력하세요",
@@ -503,17 +483,14 @@ with col_btn2:
                 st.warning("평가할 항목이 없습니다. '계획있음' 선택 후 계획을 입력하세요.")
 
 with col_btn3:
-    if st.button("💾 GitHub 저장", use_container_width=True):
-        if not university_name:
-            st.error("대학명을 입력하세요")
-        elif not get_github_token():
-            st.error("GitHub Token이 설정되지 않았습니다")
-        else:
-            success, message = save_to_gist(university_name, respondent_info)
-            if success:
-                st.success(message)
-            else:
-                st.error(message)
+    json_data = export_to_json(university_name or "대학", respondent_info or "")
+    st.download_button(
+        "💾 JSON 저장",
+        json_data,
+        f"{university_name or '대학'}_자가진단_{datetime.now().strftime('%Y%m%d')}.json",
+        "application/json",
+        use_container_width=True
+    )
 
 with col_btn4:
     df, total, grade = create_excel_data(university_name or "대학")
@@ -531,5 +508,6 @@ st.divider()
 st.markdown("""
 <div style="text-align:center; color:#666; font-size:0.9em;">
     <p>💡 사용법: "계획있음" 선택 → 계획 작성 → "AI 평가 실행" 클릭</p>
+    <p>💾 JSON 저장 후 나중에 다시 불러올 수 있습니다</p>
 </div>
 """, unsafe_allow_html=True)
