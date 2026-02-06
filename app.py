@@ -3,7 +3,7 @@ import json
 import pandas as pd
 from datetime import datetime
 import requests
-import io
+import re
 
 # ========== 페이지 설정 ==========
 st.set_page_config(
@@ -62,10 +62,6 @@ BUDGET_QUESTIONS = [
 ]
 
 # ========== 세션 상태 초기화 ==========
-if 'responses' not in st.session_state:
-    st.session_state.responses = {}
-if 'plans' not in st.session_state:
-    st.session_state.plans = {}
 if 'ai_evaluations' not in st.session_state:
     st.session_state.ai_evaluations = {}
 if 'gist_id' not in st.session_state:
@@ -129,7 +125,6 @@ def evaluate_with_ai(question_text, plan_content):
             content = response.json()["choices"][0]["message"]["content"]
             
             # 점수 파싱
-            import re
             score = 0.5
             score_match = re.search(r'점수[:\s]*([0-9.]+)', content)
             if score_match:
@@ -157,13 +152,21 @@ def calculate_scores():
         section_score = 0
         for q in section["questions"]:
             code = q["code"]
-            value = st.session_state.responses.get(code, 0)
-            
-            if value == 1:
-                section_score += q["points"]
-            elif value == 0.5:
-                ai_score = st.session_state.ai_evaluations.get(code, {}).get("score", 0.5)
-                section_score += q["points"] * ai_score
+            radio_key = f"radio_{code}"
+            if radio_key in st.session_state:
+                selected = st.session_state[radio_key]
+                if "있음" in selected and "계획" not in selected:
+                    value = 1
+                elif "계획있음" in selected:
+                    value = 0.5
+                else:
+                    value = 0
+                
+                if value == 1:
+                    section_score += q["points"]
+                elif value == 0.5:
+                    ai_score = st.session_state.ai_evaluations.get(code, {}).get("score", 0.5)
+                    section_score += q["points"] * ai_score
         
         section_scores[section["id"]] = round(section_score, 1)
         total += section_score
@@ -184,20 +187,63 @@ def get_grade(score):
     else:
         return "-", "응답을 시작하세요", "#95a5a6"
 
-# ========== GitHub Gist 저장/불러오기 ==========
+# ========== 데이터 수집 ==========
+def get_all_responses():
+    responses = {}
+    plans = {}
+    
+    for section in SECTIONS:
+        for q in section["questions"]:
+            code = q["code"]
+            radio_key = f"radio_{code}"
+            plan_key = f"plan_{code}"
+            
+            if radio_key in st.session_state:
+                selected = st.session_state[radio_key]
+                if "있음" in selected and "계획" not in selected:
+                    responses[code] = 1
+                elif "계획있음" in selected:
+                    responses[code] = 0.5
+                else:
+                    responses[code] = 0
+            
+            if plan_key in st.session_state and st.session_state[plan_key]:
+                plans[code] = st.session_state[plan_key]
+    
+    for q in BUDGET_QUESTIONS:
+        code = q["code"]
+        radio_key = f"radio_{code}"
+        plan_key = f"plan_{code}"
+        
+        if radio_key in st.session_state:
+            selected = st.session_state[radio_key]
+            if selected == "가능":
+                responses[code] = 1
+            elif selected == "확보 중":
+                responses[code] = 0.5
+            else:
+                responses[code] = 0
+        
+        if plan_key in st.session_state and st.session_state[plan_key]:
+            plans[code] = st.session_state[plan_key]
+    
+    return responses, plans
+
+# ========== GitHub Gist ==========
 def save_to_gist(university_name, respondent_info):
     token = get_github_token()
     if not token:
         return False, "GitHub Token이 설정되지 않았습니다"
     
+    responses, plans = get_all_responses()
     section_scores, total_score = calculate_scores()
     grade, _, _ = get_grade(total_score)
     
     data = {
         "university_name": university_name,
         "respondent_info": respondent_info,
-        "responses": st.session_state.responses,
-        "plans": st.session_state.plans,
+        "responses": responses,
+        "plans": plans,
         "ai_evaluations": st.session_state.ai_evaluations,
         "section_scores": section_scores,
         "total_score": total_score,
@@ -235,33 +281,9 @@ def save_to_gist(university_name, respondent_info):
     except Exception as e:
         return False, f"오류: {str(e)}"
 
-def load_from_gist(gist_id):
-    token = get_github_token()
-    if not token:
-        return False, "GitHub Token이 설정되지 않았습니다"
-    
-    try:
-        response = requests.get(
-            f"https://api.github.com/gists/{gist_id}",
-            headers={"Authorization": f"token {token}"}
-        )
-        
-        if response.status_code == 200:
-            gist = response.json()
-            files = list(gist["files"].values())
-            if files:
-                data = json.loads(files[0]["content"])
-                st.session_state.responses = data.get("responses", {})
-                st.session_state.plans = data.get("plans", {})
-                st.session_state.ai_evaluations = data.get("ai_evaluations", {})
-                st.session_state.gist_id = gist_id
-                return True, data
-        return False, "Gist를 찾을 수 없습니다"
-    except Exception as e:
-        return False, f"오류: {str(e)}"
-
-# ========== 엑셀 다운로드 ==========
+# ========== 엑셀 데이터 ==========
 def create_excel_data(university_name):
+    responses, plans = get_all_responses()
     section_scores, total_score = calculate_scores()
     grade, _, _ = get_grade(total_score)
     
@@ -269,7 +291,7 @@ def create_excel_data(university_name):
     for section in SECTIONS:
         for q in section["questions"]:
             code = q["code"]
-            value = st.session_state.responses.get(code, 0)
+            value = responses.get(code, 0)
             
             if value == 1:
                 answer = "있음"
@@ -282,7 +304,7 @@ def create_excel_data(university_name):
                 answer = "없음"
                 earned = 0
             
-            plan_content = st.session_state.plans.get(code, "")
+            plan_content = plans.get(code, "")
             ai_eval = st.session_state.ai_evaluations.get(code, {})
             ai_score_display = f"{round(ai_eval.get('score', 0) * 100)}%" if ai_eval else "-"
             ai_comment = ai_eval.get("comment", "-") if ai_eval else "-"
@@ -298,10 +320,9 @@ def create_excel_data(university_name):
                 "AI평가의견": ai_comment
             })
     
-    # 예산 항목
     for q in BUDGET_QUESTIONS:
         code = q["code"]
-        value = st.session_state.responses.get(code, 0)
+        value = responses.get(code, 0)
         answer = "가능" if value == 1 else ("확보중" if value == 0.5 else "불가능")
         
         rows.append({
@@ -310,29 +331,32 @@ def create_excel_data(university_name):
             "응답": answer,
             "배점": "필수",
             "획득점수": "-",
-            "계획내용": st.session_state.plans.get(code, ""),
+            "계획내용": plans.get(code, ""),
             "AI점수": "-",
             "AI평가의견": "-"
         })
     
     return pd.DataFrame(rows), total_score, grade
 
-# ========== UI 시작 ==========
+# ==========================================
+# UI 시작
+# ==========================================
+
 st.title("🎯 AI중심대학 준비도 자가진단")
 st.markdown("**2026년 AI중심대학 사업 신청을 위한 우리 대학의 준비 현황을 점검합니다**")
 
-# API 상태 표시
+# API 상태
 col_api1, col_api2 = st.columns(2)
 with col_api1:
     if get_openai_key():
-        st.success("✅ OpenAI API 연결됨 (AI 평가 가능)")
+        st.success("✅ OpenAI API 연결됨")
     else:
-        st.warning("⚠️ OpenAI API 미설정 (계획있음 = 50% 고정)")
+        st.warning("⚠️ OpenAI API 미설정")
 with col_api2:
     if get_github_token():
-        st.success("✅ GitHub 연결됨 (클라우드 저장 가능)")
+        st.success("✅ GitHub 연결됨")
     else:
-        st.warning("⚠️ GitHub 미설정 (로컬 저장만 가능)")
+        st.warning("⚠️ GitHub 미설정")
 
 st.divider()
 
@@ -341,10 +365,8 @@ section_scores, total_score = calculate_scores()
 grade, grade_desc, grade_color = get_grade(total_score)
 
 col1, col2, col3 = st.columns([1, 2, 1])
-
 with col1:
     st.metric("총점", f"{total_score}/100점")
-
 with col2:
     score_cols = st.columns(6)
     section_names = ["거버넌스", "교육체계", "제도화", "산업연계", "특성화", "확산"]
@@ -352,7 +374,6 @@ with col2:
     for i, (name, stotal) in enumerate(zip(section_names, section_totals)):
         with score_cols[i]:
             st.metric(name, f"{section_scores.get(i+1, 0)}/{stotal}")
-
 with col3:
     st.markdown(f"""
     <div style="background:{grade_color}; color:white; padding:20px; border-radius:15px; text-align:center;">
@@ -363,29 +384,12 @@ with col3:
 
 st.divider()
 
-# ========== 대학 정보 입력 ==========
+# ========== 대학 정보 ==========
 col_uni1, col_uni2 = st.columns(2)
 with col_uni1:
     university_name = st.text_input("📍 대학명 *", key="university_name")
 with col_uni2:
     respondent_info = st.text_input("👤 응답자 정보 (선택)", key="respondent_info")
-
-# Gist 불러오기
-with st.expander("📂 기존 데이터 불러오기"):
-    col_gist1, col_gist2 = st.columns([3, 1])
-    with col_gist1:
-        gist_id_input = st.text_input("Gist ID", value=st.session_state.gist_id, key="gist_id_input")
-    with col_gist2:
-        if st.button("불러오기", use_container_width=True):
-            if gist_id_input:
-                success, result = load_from_gist(gist_id_input)
-                if success:
-                    st.success("✅ 불러오기 완료!")
-                    st.rerun()
-                else:
-                    st.error(f"❌ {result}")
-            else:
-                st.warning("Gist ID를 입력하세요")
 
 st.divider()
 
@@ -393,99 +397,59 @@ st.divider()
 for section in SECTIONS:
     with st.expander(f"**{section['id']}. {section['title']}** ({section['total']}점)", expanded=True):
         for q in section["questions"]:
-            st.markdown(f"**{q['text']}** ({q['points']}점)")
+            st.markdown(f"**{q['text']}** `{q['points']}점`")
             
-            col_opt, col_plan = st.columns([1, 2])
+            options = ["없음 (0점)", "계획있음 (AI평가)", f"있음 ({q['points']}점)"]
             
-            with col_opt:
-                options = ["없음 (0점)", f"계획있음 (AI평가)", f"있음 ({q['points']}점)"]
-                current = st.session_state.responses.get(q["code"], 0)
-                if current == 1:
-                    default_idx = 2
-                elif current == 0.5:
-                    default_idx = 1
-                else:
-                    default_idx = 0
-                
-                selected = st.radio(
-                    "응답",
-                    options,
-                    index=default_idx,
-                    key=f"radio_{q['code']}",
-                    label_visibility="collapsed",
-                    horizontal=True
+            selected = st.radio(
+                f"응답_{q['code']}",
+                options,
+                index=0,
+                key=f"radio_{q['code']}",
+                label_visibility="collapsed",
+                horizontal=True
+            )
+            
+            # ★ 핵심: "계획있음" 선택 시 계획 입력란 표시
+            if "계획있음" in selected:
+                st.text_area(
+                    "📝 계획 내용을 입력하세요 (AI가 평가합니다)",
+                    key=f"plan_{q['code']}",
+                    height=100,
+                    placeholder="구체적인 추진 계획을 작성하세요..."
                 )
                 
-                # 값 저장
-                if "있음" in selected:
-                    st.session_state.responses[q["code"]] = 1
-                elif "계획있음" in selected:
-                    st.session_state.responses[q["code"]] = 0.5
-                else:
-                    st.session_state.responses[q["code"]] = 0
-            
-            with col_plan:
-                if st.session_state.responses.get(q["code"]) == 0.5:
-                    plan = st.text_area(
-                        "계획 내용 (AI가 평가합니다)",
-                        value=st.session_state.plans.get(q["code"], ""),
-                        key=f"plan_{q['code']}",
-                        height=80,
-                        label_visibility="collapsed",
-                        placeholder="구체적인 계획을 작성하세요..."
-                    )
-                    st.session_state.plans[q["code"]] = plan
-                    
-                    # AI 평가 결과 표시
-                    if q["code"] in st.session_state.ai_evaluations:
-                        ai_eval = st.session_state.ai_evaluations[q["code"]]
-                        st.info(f"🤖 AI 평가: **{round(ai_eval['score']*100)}%** - {ai_eval['comment']}")
+                # AI 평가 결과 표시
+                if q["code"] in st.session_state.ai_evaluations:
+                    ai_eval = st.session_state.ai_evaluations[q["code"]]
+                    st.info(f"🤖 **AI 평가: {round(ai_eval['score']*100)}%** - {ai_eval['comment']}")
             
             st.markdown("---")
 
 # ========== 예산 섹션 ==========
 with st.expander("**※ 예산 (필수 확인)**", expanded=True):
     for q in BUDGET_QUESTIONS:
-        st.markdown(f"**{q['text']}** 🔴 필수")
+        st.markdown(f"**{q['text']}** `🔴 필수`")
         
-        col_opt, col_plan = st.columns([1, 2])
+        options = ["불가능", "확보 중", "가능"]
         
-        with col_opt:
-            options = ["불가능", "확보 중", "가능"]
-            current = st.session_state.responses.get(q["code"], 0)
-            if current == 1:
-                default_idx = 2
-            elif current == 0.5:
-                default_idx = 1
-            else:
-                default_idx = 0
-            
-            selected = st.radio(
-                "응답",
-                options,
-                index=default_idx,
-                key=f"radio_{q['code']}",
-                label_visibility="collapsed",
-                horizontal=True
+        selected = st.radio(
+            f"응답_{q['code']}",
+            options,
+            index=0,
+            key=f"radio_{q['code']}",
+            label_visibility="collapsed",
+            horizontal=True
+        )
+        
+        # "확보 중" 선택 시 계획 입력란 표시
+        if selected == "확보 중":
+            st.text_area(
+                "📝 확보 계획을 입력하세요",
+                key=f"plan_{q['code']}",
+                height=100,
+                placeholder="예산 확보 계획을 작성하세요..."
             )
-            
-            if selected == "가능":
-                st.session_state.responses[q["code"]] = 1
-            elif selected == "확보 중":
-                st.session_state.responses[q["code"]] = 0.5
-            else:
-                st.session_state.responses[q["code"]] = 0
-        
-        with col_plan:
-            if st.session_state.responses.get(q["code"]) == 0.5:
-                plan = st.text_area(
-                    "확보 계획",
-                    value=st.session_state.plans.get(q["code"], ""),
-                    key=f"plan_{q['code']}",
-                    height=80,
-                    label_visibility="collapsed"
-                )
-                st.session_state.plans[q["code"]] = plan
         
         st.markdown("---")
 
@@ -496,9 +460,8 @@ col_btn1, col_btn2, col_btn3, col_btn4 = st.columns(4)
 
 with col_btn1:
     if st.button("🔄 초기화", use_container_width=True):
-        st.session_state.responses = {}
-        st.session_state.plans = {}
-        st.session_state.ai_evaluations = {}
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
         st.rerun()
 
 with col_btn2:
@@ -506,10 +469,11 @@ with col_btn2:
         if not get_openai_key():
             st.error("OpenAI API Key가 설정되지 않았습니다")
         else:
-            # 계획있음 항목만 평가
+            responses, plans = get_all_responses()
+            
             plans_to_evaluate = [
-                code for code, value in st.session_state.responses.items()
-                if value == 0.5 and st.session_state.plans.get(code)
+                code for code, value in responses.items()
+                if value == 0.5 and plans.get(code)
             ]
             
             if plans_to_evaluate:
@@ -519,7 +483,6 @@ with col_btn2:
                 for i, code in enumerate(plans_to_evaluate):
                     status.text(f"평가 중... ({i+1}/{len(plans_to_evaluate)})")
                     
-                    # 질문 텍스트 찾기
                     q_text = code
                     for section in SECTIONS:
                         for q in section["questions"]:
@@ -530,14 +493,14 @@ with col_btn2:
                         if q["code"] == code:
                             q_text = q["text"]
                     
-                    result = evaluate_with_ai(q_text, st.session_state.plans[code])
+                    result = evaluate_with_ai(q_text, plans[code])
                     st.session_state.ai_evaluations[code] = result
                     progress.progress((i + 1) / len(plans_to_evaluate))
                 
-                status.text("✅ AI 평가 완료!")
+                st.success(f"✅ AI 평가 완료! ({len(plans_to_evaluate)}개 항목)")
                 st.rerun()
             else:
-                st.warning("평가할 '계획있음' 항목이 없습니다")
+                st.warning("평가할 항목이 없습니다. '계획있음' 선택 후 계획을 입력하세요.")
 
 with col_btn3:
     if st.button("💾 GitHub 저장", use_container_width=True):
@@ -554,8 +517,6 @@ with col_btn3:
 
 with col_btn4:
     df, total, grade = create_excel_data(university_name or "대학")
-    
-    # CSV로 다운로드 (엑셀 호환)
     csv = df.to_csv(index=False).encode('utf-8-sig')
     st.download_button(
         "📥 엑셀 다운로드",
@@ -569,8 +530,6 @@ with col_btn4:
 st.divider()
 st.markdown("""
 <div style="text-align:center; color:#666; font-size:0.9em;">
-    <p>2026년 AI중심대학 자가진단 도구</p>
-    <p>💡 "계획있음" 선택 후 계획 작성 → "AI 평가 실행" 클릭</p>
-    <p>📁 GitHub 저장 시 Gist ID가 생성되며, 이후 불러오기 가능</p>
+    <p>💡 사용법: "계획있음" 선택 → 계획 작성 → "AI 평가 실행" 클릭</p>
 </div>
 """, unsafe_allow_html=True)
